@@ -1,0 +1,372 @@
+/* USER CODE BEGIN Header */
+/**
+  ******************************************************************************
+  * @file           : main.c
+  * @brief          : OLED hiển thị biểu cảm khuôn mặt
+  ******************************************************************************
+  */
+/* USER CODE END Header */
+/* Includes ------------------------------------------------------------------*/
+#include "main.h"
+#include "i2c.h"
+#include "gpio.h"
+
+/* Private includes ----------------------------------------------------------*/
+/* USER CODE BEGIN Includes */
+#include <string.h>
+/* USER CODE END Includes */
+
+/* Private define ------------------------------------------------------------*/
+/* USER CODE BEGIN PD */
+#define OLED_ADDR           0x3C   // Địa chỉ I2C (có thể là 0x3D)
+#define OLED_WIDTH          128
+#define OLED_HEIGHT         64
+#define OLED_PAGES          8
+
+#define LED_PIN             GPIO_PIN_12
+#define LED_PORT            GPIOB
+/* USER CODE END PD */
+
+/* Private variables ---------------------------------------------------------*/
+/* USER CODE BEGIN PV */
+uint8_t oled_buffer[OLED_WIDTH * OLED_PAGES];
+uint8_t current_face = 0;
+uint32_t last_change = 0;
+/* USER CODE END PV */
+
+/* Private function prototypes -----------------------------------------------*/
+void SystemClock_Config(void);
+/* USER CODE BEGIN PFP */
+void OLED_WriteCommand(uint8_t cmd);
+void OLED_WriteData(uint8_t data);
+void OLED_Init(void);
+void OLED_Clear(void);
+void OLED_Update(void);
+void OLED_DrawPixel(uint8_t x, uint8_t y, uint8_t color);
+void OLED_DrawFace_Happy(void);
+void OLED_DrawFace_Sad(void);
+void OLED_DrawFace_Surprised(void);
+void OLED_DrawFace_Wink(void);
+void OLED_DrawFace_Heart(void);
+void OLED_DrawFace_BigSmile(void);
+void LED_Blink(uint32_t times, uint32_t delay_ms);
+/* USER CODE END PFP */
+
+/* Private user code ---------------------------------------------------------*/
+/* USER CODE BEGIN 0 */
+void LED_Blink(uint32_t times, uint32_t delay_ms) {
+    for (uint32_t i = 0; i < times; i++) {
+        HAL_GPIO_WritePin(LED_PORT, LED_PIN, GPIO_PIN_SET);
+        HAL_Delay(delay_ms);
+        HAL_GPIO_WritePin(LED_PORT, LED_PIN, GPIO_PIN_RESET);
+        HAL_Delay(delay_ms);
+    }
+}
+
+void OLED_WriteCommand(uint8_t cmd) {
+    uint8_t buffer[2] = {0x00, cmd};
+    HAL_I2C_Master_Transmit(&hi2c1, OLED_ADDR << 1, buffer, 2, 100);
+}
+
+void OLED_WriteData(uint8_t data) {
+    uint8_t buffer[2] = {0x40, data};
+    HAL_I2C_Master_Transmit(&hi2c1, OLED_ADDR << 1, buffer, 2, 100);
+}
+
+void OLED_Init(void) {
+    HAL_Delay(100);
+    
+    OLED_WriteCommand(0xAE);  // Display OFF
+    OLED_WriteCommand(0xD5);  // Set display clock divide ratio
+    OLED_WriteCommand(0x80);
+    OLED_WriteCommand(0xA8);  // Set multiplex ratio (64)
+    OLED_WriteCommand(0x3F);
+    OLED_WriteCommand(0xD3);  // Set display offset (0)
+    OLED_WriteCommand(0x00);
+    OLED_WriteCommand(0x40);  // Set start line (0)
+    OLED_WriteCommand(0x8D);  // Charge pump setting
+    OLED_WriteCommand(0x14);  // Enable charge pump
+    OLED_WriteCommand(0x20);  // Memory addressing mode
+    OLED_WriteCommand(0x00);  // Horizontal
+    OLED_WriteCommand(0xA1);  // Segment remap
+    OLED_WriteCommand(0xC8);  // COM output scan direction
+    OLED_WriteCommand(0xDA);  // COM pins hardware config
+    OLED_WriteCommand(0x12);
+    OLED_WriteCommand(0x81);  // Set contrast
+    OLED_WriteCommand(0xCF);
+    OLED_WriteCommand(0xD9);  // Set pre-charge period
+    OLED_WriteCommand(0xF1);
+    OLED_WriteCommand(0xDB);  // Set VCOMH deselect level
+    OLED_WriteCommand(0x40);
+    OLED_WriteCommand(0xA4);  // Resume to RAM content
+    OLED_WriteCommand(0xA6);  // Normal display
+    OLED_WriteCommand(0x2E);  // Deactivate scroll
+    OLED_WriteCommand(0xAF);  // Display ON
+    
+    OLED_Clear();
+    OLED_Update();
+}
+
+void OLED_Clear(void) {
+    for (uint16_t i = 0; i < OLED_WIDTH * OLED_PAGES; i++) {
+        oled_buffer[i] = 0x00;
+    }
+}
+
+void OLED_Update(void) {
+    for (uint8_t page = 0; page < OLED_PAGES; page++) {
+        OLED_WriteCommand(0xB0 + page);
+        OLED_WriteCommand(0x00);
+        OLED_WriteCommand(0x10);
+        for (uint8_t col = 0; col < OLED_WIDTH; col++) {
+            OLED_WriteData(oled_buffer[page * OLED_WIDTH + col]);
+        }
+    }
+}
+
+void OLED_DrawPixel(uint8_t x, uint8_t y, uint8_t color) {
+    if (x >= OLED_WIDTH || y >= OLED_HEIGHT) return;
+    uint8_t page = y / 8;
+    uint8_t bit = y % 8;
+    if (color) {
+        oled_buffer[page * OLED_WIDTH + x] |= (1 << bit);
+    } else {
+        oled_buffer[page * OLED_WIDTH + x] &= ~(1 << bit);
+    }
+}
+
+// Vẽ hình tròn (Bresenham)
+void OLED_DrawCircle(uint8_t cx, uint8_t cy, uint8_t radius, uint8_t color) {
+    int x = 0, y = radius;
+    int d = 3 - 2 * radius;
+    
+    while (x <= y) {
+        OLED_DrawPixel(cx + x, cy + y, color);
+        OLED_DrawPixel(cx - x, cy + y, color);
+        OLED_DrawPixel(cx + x, cy - y, color);
+        OLED_DrawPixel(cx - x, cy - y, color);
+        OLED_DrawPixel(cx + y, cy + x, color);
+        OLED_DrawPixel(cx - y, cy + x, color);
+        OLED_DrawPixel(cx + y, cy - x, color);
+        OLED_DrawPixel(cx - y, cy - x, color);
+        x++;
+        if (d < 0) {
+            d = d + 4 * x + 6;
+        } else {
+            d = d + 4 * (x - y) + 10;
+            y--;
+        }
+    }
+}
+
+// Vẽ hình mặt cười
+void OLED_DrawFace_Happy(void) {
+    OLED_Clear();
+    // Vẽ mặt tròn (64x64 tại tâm 64,32)
+    OLED_DrawCircle(64, 32, 28, 1);  // Mặt
+    
+    // Mắt trái (44, 20)
+    OLED_DrawPixel(52, 20, 1);
+    OLED_DrawPixel(53, 20, 1);
+    OLED_DrawPixel(51, 21, 1);
+    OLED_DrawPixel(54, 21, 1);
+    
+    // Mắt phải (76, 20)
+    OLED_DrawPixel(74, 20, 1);
+    OLED_DrawPixel(75, 20, 1);
+    OLED_DrawPixel(73, 21, 1);
+    OLED_DrawPixel(76, 21, 1);
+    
+    // Miệng cười (cung tròn)
+    for (int i = -15; i <= 15; i++) {
+        int y = 8 - (i * i) / 20;
+        OLED_DrawPixel(64 + i, 40 + y, 1);
+    }
+    OLED_Update();
+}
+
+// Vẽ mặt buồn
+void OLED_DrawFace_Sad(void) {
+    OLED_Clear();
+    OLED_DrawCircle(64, 32, 28, 1);
+    
+    // Mắt
+    OLED_DrawPixel(52, 20, 1);
+    OLED_DrawPixel(53, 20, 1);
+    OLED_DrawPixel(74, 20, 1);
+    OLED_DrawPixel(75, 20, 1);
+    
+    // Miệng buồn (cung tròn ngược)
+    for (int i = -15; i <= 15; i++) {
+        int y = -6 + (i * i) / 20;
+        OLED_DrawPixel(64 + i, 48 + y, 1);
+    }
+    OLED_Update();
+}
+
+// Vẽ mặt ngạc nhiên
+void OLED_DrawFace_Surprised(void) {
+    OLED_Clear();
+    OLED_DrawCircle(64, 32, 28, 1);
+    
+    // Mắt tròn to
+    OLED_DrawCircle(52, 22, 5, 1);
+    OLED_DrawCircle(76, 22, 5, 1);
+    
+    // Miệng tròn (O)
+    OLED_DrawCircle(64, 42, 8, 1);
+    OLED_Update();
+}
+
+// Vẽ mặt nháy mắt
+void OLED_DrawFace_Wink(void) {
+    OLED_Clear();
+    OLED_DrawCircle(64, 32, 28, 1);
+    
+    // Mắt trái (mở)
+    OLED_DrawPixel(52, 20, 1);
+    OLED_DrawPixel(53, 20, 1);
+    OLED_DrawPixel(51, 21, 1);
+    OLED_DrawPixel(54, 21, 1);
+    
+    // Mắt phải (nháy - đường thẳng)
+    for (int i = 73; i <= 77; i++) {
+        OLED_DrawPixel(i, 21, 1);
+    }
+    
+    // Miệng cười
+    for (int i = -15; i <= 15; i++) {
+        int y = 8 - (i * i) / 20;
+        OLED_DrawPixel(64 + i, 40 + y, 1);
+    }
+    OLED_Update();
+}
+
+// Vẽ mặt tim
+void OLED_DrawFace_Heart(void) {
+    OLED_Clear();
+    OLED_DrawCircle(64, 32, 28, 1);
+    
+    // Mắt trái (tim nhỏ)
+    OLED_DrawPixel(52, 20, 1);
+    OLED_DrawPixel(53, 20, 1);
+    OLED_DrawPixel(51, 21, 1);
+    OLED_DrawPixel(54, 21, 1);
+    
+    // Mắt phải (tim nhỏ)
+    OLED_DrawPixel(74, 20, 1);
+    OLED_DrawPixel(75, 20, 1);
+    OLED_DrawPixel(73, 21, 1);
+    OLED_DrawPixel(76, 21, 1);
+    
+    // Vẽ hình trái tim ở miệng
+    OLED_DrawPixel(64, 44, 1);
+    OLED_DrawPixel(63, 45, 1);
+    OLED_DrawPixel(65, 45, 1);
+    OLED_DrawPixel(62, 46, 1);
+    OLED_DrawPixel(64, 46, 1);
+    OLED_DrawPixel(66, 46, 1);
+    OLED_DrawPixel(61, 47, 1);
+    OLED_DrawPixel(63, 47, 1);
+    OLED_DrawPixel(65, 47, 1);
+    OLED_DrawPixel(67, 47, 1);
+    OLED_DrawPixel(62, 48, 1);
+    OLED_DrawPixel(66, 48, 1);
+    OLED_DrawPixel(63, 49, 1);
+    OLED_DrawPixel(65, 49, 1);
+    OLED_DrawPixel(64, 50, 1);
+    
+    OLED_Update();
+}
+
+// Vẽ mặt cười lớn
+void OLED_DrawFace_BigSmile(void) {
+    OLED_Clear();
+    OLED_DrawCircle(64, 32, 28, 1);
+    
+    // Mắt (gạch ngang - đang nhắm)
+    for (int i = 48; i <= 56; i++) OLED_DrawPixel(i, 21, 1);
+    for (int i = 72; i <= 80; i++) OLED_DrawPixel(i, 21, 1);
+    
+    // Miệng cười to
+    for (int i = -20; i <= 20; i++) {
+        int y = 12 - (i * i) / 25;
+        OLED_DrawPixel(64 + i, 42 + y, 1);
+    }
+    OLED_Update();
+}
+
+/* USER CODE END 0 */
+
+int main(void)
+{
+  HAL_Init();
+  SystemClock_Config();
+  MX_GPIO_Init();
+  MX_I2C1_Init();
+
+  /* USER CODE BEGIN 2 */
+  
+  LED_Blink(2, 200);
+  OLED_Init();
+  
+  /* USER CODE END 2 */
+
+  while (1)
+  {
+    /* USER CODE BEGIN 3 */
+    
+    // Hiển thị lần lượt các biểu cảm, mỗi biểu cảm 2 giây
+    OLED_DrawFace_Happy();
+    HAL_Delay(2000);
+    
+    OLED_DrawFace_Sad();
+    HAL_Delay(2000);
+    
+    OLED_DrawFace_Surprised();
+    HAL_Delay(2000);
+    
+    OLED_DrawFace_Wink();
+    HAL_Delay(2000);
+    
+    OLED_DrawFace_Heart();
+    HAL_Delay(2000);
+    
+    OLED_DrawFace_BigSmile();
+    HAL_Delay(2000);
+    
+    LED_Blink(1, 100);  // Báo hiệu 1 vòng
+    
+    /* USER CODE END 3 */
+  }
+}
+
+void SystemClock_Config(void)
+{
+  RCC_OscInitTypeDef RCC_OscInitStruct = {0};
+  RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
+
+  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSE;
+  RCC_OscInitStruct.HSEState = RCC_HSE_ON;
+  RCC_OscInitStruct.HSEPredivValue = RCC_HSE_PREDIV_DIV1;
+  RCC_OscInitStruct.HSIState = RCC_HSI_ON;
+  RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
+  RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSE;
+  RCC_OscInitStruct.PLL.PLLMUL = RCC_PLL_MUL9;
+  if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK) Error_Handler();
+
+  RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK|RCC_CLOCKTYPE_SYSCLK
+                              |RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2;
+  RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
+  RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
+  RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV2;
+  RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV1;
+
+  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_2) != HAL_OK) Error_Handler();
+}
+
+void Error_Handler(void)
+{
+  __disable_irq();
+  while(1) {}
+}
