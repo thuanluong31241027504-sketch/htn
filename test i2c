@@ -1,0 +1,163 @@
+/* USER CODE BEGIN Header */
+/**
+  ******************************************************************************
+  * @file           : main.c
+  * @brief          : I2C CONTINUOUS SCANNER - Test VL53L0X connection
+  ******************************************************************************
+  */
+/* USER CODE END Header */
+/* Includes ------------------------------------------------------------------*/
+#include "main.h"
+#include "i2c.h"
+#include "usart.h"
+#include "gpio.h"
+
+/* Private includes ----------------------------------------------------------*/
+/* USER CODE BEGIN Includes */
+#include <stdio.h>
+#include <string.h>
+/* USER CODE END Includes */
+
+/* Private define ------------------------------------------------------------*/
+/* USER CODE BEGIN PD */
+#define LED_PIN                             GPIO_PIN_12
+#define LED_PORT                            GPIOB
+
+#define VL53L0X_ADDR_29                     0x29
+#define VL53L0X_ADDR_41                     0x41
+/* USER CODE END PD */
+
+/* Private variables ---------------------------------------------------------*/
+/* USER CODE BEGIN PV */
+uint8_t last_found = 0;
+uint8_t current_found = 0;
+/* USER CODE END PV */
+
+/* Private function prototypes -----------------------------------------------*/
+void SystemClock_Config(void);
+/* USER CODE BEGIN PFP */
+static void LED_On(void);
+static void LED_Off(void);
+static void LED_Blink(uint32_t times, uint32_t delay_ms);
+static void UART_Print(const char *msg);
+static void UART_PrintNumber(const char *prefix, uint32_t num, const char *suffix);
+static void I2C_Scan(void);
+/* USER CODE END PFP */
+
+/* Private user code ---------------------------------------------------------*/
+/* USER CODE BEGIN 0 */
+static void LED_On(void) {
+    HAL_GPIO_WritePin(LED_PORT, LED_PIN, GPIO_PIN_SET);
+}
+
+static void LED_Off(void) {
+    HAL_GPIO_WritePin(LED_PORT, LED_PIN, GPIO_PIN_RESET);
+}
+
+static void LED_Blink(uint32_t times, uint32_t delay_ms) {
+    for (uint32_t i = 0; i < times; i++) {
+        LED_On();
+        HAL_Delay(delay_ms);
+        LED_Off();
+        HAL_Delay(delay_ms);
+    }
+}
+
+static void UART_Print(const char *msg) {
+    HAL_UART_Transmit(&huart1, (uint8_t*)msg, strlen(msg), 100);
+}
+
+static void UART_PrintNumber(const char *prefix, uint32_t num, const char *suffix) {
+    char buffer[64];
+    int len = sprintf(buffer, "%s%lu%s", prefix, num, suffix);
+    HAL_UART_Transmit(&huart1, (uint8_t*)buffer, len, 100);
+}
+
+static void I2C_Scan(void) {
+    uint8_t found_29 = 0;
+    uint8_t found_41 = 0;
+    
+    /* Scan all I2C addresses */
+    for (uint8_t addr = 1; addr < 127; addr++) {
+        if (HAL_I2C_IsDeviceReady(&hi2c1, addr << 1, 3, 50) == HAL_OK) {
+            if (addr == VL53L0X_ADDR_29) found_29 = 1;
+            if (addr == VL53L0X_ADDR_41) found_41 = 1;
+        }
+    }
+    
+    /* Report status */
+    if (found_29) {
+        UART_Print("[OK] VL53L0X found at 0x29\r\n");
+        LED_Blink(1, 30);
+    } else if (found_41) {
+        UART_Print("[OK] VL53L0X found at 0x41\r\n");
+        LED_Blink(1, 30);
+    } else {
+        UART_Print("[WARN] No VL53L0X found\r\n");
+        LED_Off();
+    }
+}
+/* USER CODE END 0 */
+
+int main(void)
+{
+    HAL_Init();
+    SystemClock_Config();
+    MX_GPIO_Init();
+    MX_I2C1_Init();
+    MX_USART1_UART_Init();
+
+    /* USER CODE BEGIN 2 */
+    UART_Print("\r\n");
+    UART_Print("╔════════════════════════════════════════════╗\r\n");
+    UART_Print("║     I2C CONTINUOUS SCANNER               ║\r\n");
+    UART_Print("║     Testing VL53L0X connection           ║\r\n");
+    UART_Print("╚════════════════════════════════════════════╝\r\n");
+    UART_Print("\r\n");
+    UART_Print("Scanning every 1 second...\r\n");
+    UART_Print("----------------------------------------\r\n");
+    
+    LED_Blink(3, 200);
+    /* USER CODE END 2 */
+
+    /* Infinite loop */
+    while (1)
+    {
+        /* USER CODE BEGIN 3 */
+        I2C_Scan();
+        HAL_Delay(1000);
+        /* USER CODE END 3 */
+    }
+}
+
+void SystemClock_Config(void)
+{
+    RCC_OscInitTypeDef RCC_OscInitStruct = {0};
+    RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
+
+    RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSE;
+    RCC_OscInitStruct.HSEState = RCC_HSE_ON;
+    RCC_OscInitStruct.HSEPredivValue = RCC_HSE_PREDIV_DIV1;
+    RCC_OscInitStruct.HSIState = RCC_HSI_ON;
+    RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
+    RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSE;
+    RCC_OscInitStruct.PLL.PLLMUL = RCC_PLL_MUL9;
+    if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK) Error_Handler();
+
+    RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK|RCC_CLOCKTYPE_SYSCLK
+                                |RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2;
+    RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
+    RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
+    RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV2;
+    RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV1;
+
+    if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_2) != HAL_OK) Error_Handler();
+}
+
+void Error_Handler(void)
+{
+    __disable_irq();
+    while(1) {
+        HAL_Delay(100);
+    }
+}
