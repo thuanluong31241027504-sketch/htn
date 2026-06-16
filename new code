@@ -1,0 +1,476 @@
+/* USER CODE BEGIN Header */
+/**
+  ******************************************************************************
+  * @file           : main.c
+  * @brief          : OLED (I2C1) + VL53L0X (I2C2) + UART Commands
+  ******************************************************************************
+  */
+/* USER CODE END Header */
+/* Includes ------------------------------------------------------------------*/
+#include "main.h"
+#include "i2c.h"
+#include "gpio.h"
+#include "usart.h"
+
+/* Private includes ----------------------------------------------------------*/
+/* USER CODE BEGIN Includes */
+#include <stdio.h>
+#include <string.h>
+/* USER CODE END Includes */
+
+/* Private define ------------------------------------------------------------*/
+/* USER CODE BEGIN PD */
+/* OLED (I2C1 - PB6, PB7) */
+#define OLED_ADDR           0x3C
+
+/* VL53L0X (I2C2 - PB10, PB11) */
+#define VL53L0X_ADDR        0x29
+#define VL53L0X_REG_ID_MODEL 0xC0
+#define VL53L0X_REG_DISTANCE 0x8F
+#define VL53L0X_REG_START    0x00
+#define VL53L0X_EXPECTED_ID  0xEE
+
+/* LED */
+#define LED_PIN             GPIO_PIN_12
+#define LED_PORT            GPIOB
+
+/* UART Buffer */
+#define UART_BUFFER_SIZE    64
+/* USER CODE END PD */
+
+/* Private variables ---------------------------------------------------------*/
+/* USER CODE BEGIN PV */
+/* VL53L0X */
+uint16_t laser_distance = 0;
+uint8_t laser_ok = 0;
+
+/* UART */
+char uart_buffer[UART_BUFFER_SIZE];
+uint8_t uart_index = 0;
+uint8_t rx_data;
+/* USER CODE END PV */
+
+/* Private function prototypes -----------------------------------------------*/
+void SystemClock_Config(void);
+/* USER CODE BEGIN PFP */
+
+/* OLED Functions */
+void OLED_WriteCommand(uint8_t cmd);
+void OLED_WriteData(uint8_t data);
+void OLED_Init(void);
+void OLED_Clear(void);
+void OLED_SetCursor(uint8_t x, uint8_t y);
+void OLED_PrintString(char *str);
+void OLED_PrintNumber(uint16_t num);
+void OLED_DisplayDistance(uint16_t distance);
+
+/* VL53L0X Functions */
+uint8_t VL53L0X_Init(void);
+uint16_t VL53L0X_ReadDistance(void);
+
+/* LED Functions */
+void LED_Blink(uint32_t times, uint32_t delay_ms);
+void LED_On(void);
+void LED_Off(void);
+
+/* UART Functions */
+void UART_Print(const char *msg);
+void UART_PrintNumber(const char *prefix, uint32_t num, const char *suffix);
+void UART_SendResponse(const char *response);
+void ProcessUARTCommand(void);
+
+/* USER CODE END PFP */
+
+/* Private user code ---------------------------------------------------------*/
+/* USER CODE BEGIN 0 */
+
+/* ========== UART FUNCTIONS ========== */
+void UART_Print(const char *msg) {
+    HAL_UART_Transmit(&huart1, (uint8_t*)msg, strlen(msg), 100);
+}
+
+void UART_PrintNumber(const char *prefix, uint32_t num, const char *suffix) {
+    char buffer[64];
+    int len = sprintf(buffer, "%s%lu%s", prefix, num, suffix);
+    HAL_UART_Transmit(&huart1, (uint8_t*)buffer, len, 100);
+}
+
+void UART_SendResponse(const char *response) {
+    char buffer[64];
+    sprintf(buffer, "%s\r\n", response);
+    HAL_UART_Transmit(&huart1, (uint8_t*)buffer, strlen(buffer), 100);
+}
+
+void ProcessUARTCommand(void) {
+    if (uart_index > 0 && uart_buffer[uart_index-1] == '\n') {
+        uart_buffer[uart_index-1] = '\0';
+        
+        if (strcmp(uart_buffer, "GET_DIST") == 0) {
+            laser_distance = VL53L0X_ReadDistance();
+            char resp[32];
+            sprintf(resp, "Distance: %d mm", laser_distance);
+            UART_SendResponse(resp);
+            OLED_DisplayDistance(laser_distance);
+        }
+        else if (strcmp(uart_buffer, "LED_ON") == 0) {
+            LED_On();
+            UART_SendResponse("LED: ON");
+        }
+        else if (strcmp(uart_buffer, "LED_OFF") == 0) {
+            LED_Off();
+            UART_SendResponse("LED: OFF");
+        }
+        else if (strlen(uart_buffer) > 0) {
+            UART_SendResponse("Unknown command");
+        }
+        
+        uart_index = 0;
+        memset(uart_buffer, 0, sizeof(uart_buffer));
+    }
+}
+
+/* ========== LED FUNCTIONS ========== */
+void LED_On(void) {
+    HAL_GPIO_WritePin(LED_PORT, LED_PIN, GPIO_PIN_SET);
+}
+
+void LED_Off(void) {
+    HAL_GPIO_WritePin(LED_PORT, LED_PIN, GPIO_PIN_RESET);
+}
+
+void LED_Blink(uint32_t times, uint32_t delay_ms) {
+    for (uint32_t i = 0; i < times; i++) {
+        LED_On();
+        HAL_Delay(delay_ms);
+        LED_Off();
+        HAL_Delay(delay_ms);
+    }
+}
+
+/* ========== OLED FUNCTIONS ========== */
+void OLED_WriteCommand(uint8_t cmd) {
+    uint8_t buffer[2] = {0x00, cmd};
+    HAL_I2C_Master_Transmit(&hi2c1, OLED_ADDR << 1, buffer, 2, 100);
+}
+
+void OLED_WriteData(uint8_t data) {
+    uint8_t buffer[2] = {0x40, data};
+    HAL_I2C_Master_Transmit(&hi2c1, OLED_ADDR << 1, buffer, 2, 100);
+}
+
+void OLED_Init(void) {
+    HAL_Delay(100);
+    
+    OLED_WriteCommand(0xAE);  // Display OFF
+    OLED_WriteCommand(0xD5);  // Set display clock divide ratio
+    OLED_WriteCommand(0x80);
+    OLED_WriteCommand(0xA8);  // Set multiplex ratio (64)
+    OLED_WriteCommand(0x3F);
+    OLED_WriteCommand(0xD3);  // Set display offset (0)
+    OLED_WriteCommand(0x00);
+    OLED_WriteCommand(0x40);  // Set start line (0)
+    OLED_WriteCommand(0x8D);  // Charge pump setting
+    OLED_WriteCommand(0x14);  // Enable charge pump
+    OLED_WriteCommand(0x20);  // Memory addressing mode
+    OLED_WriteCommand(0x00);  // Horizontal
+    OLED_WriteCommand(0xA1);  // Segment remap
+    OLED_WriteCommand(0xC8);  // COM output scan direction
+    OLED_WriteCommand(0xDA);  // COM pins hardware config
+    OLED_WriteCommand(0x12);
+    OLED_WriteCommand(0x81);  // Set contrast
+    OLED_WriteCommand(0xCF);
+    OLED_WriteCommand(0xD9);  // Set pre-charge period
+    OLED_WriteCommand(0xF1);
+    OLED_WriteCommand(0xDB);  // Set VCOMH deselect level
+    OLED_WriteCommand(0x40);
+    OLED_WriteCommand(0xA4);  // Resume to RAM content
+    OLED_WriteCommand(0xA6);  // Normal display
+    OLED_WriteCommand(0x2E);  // Deactivate scroll
+    OLED_WriteCommand(0xAF);  // Display ON
+    
+    HAL_Delay(100);
+}
+
+void OLED_Clear(void) {
+    for (uint8_t page = 0; page < 8; page++) {
+        OLED_WriteCommand(0xB0 + page);
+        OLED_WriteCommand(0x00);
+        OLED_WriteCommand(0x10);
+        for (uint8_t col = 0; col < 128; col++) {
+            OLED_WriteData(0x00);
+        }
+    }
+}
+
+void OLED_SetCursor(uint8_t x, uint8_t y) {
+    OLED_WriteCommand(0xB0 + y);
+    OLED_WriteCommand((x & 0x0F));
+    OLED_WriteCommand(0x10 | ((x >> 4) & 0x0F));
+}
+
+/* Simple font for numbers and letters */
+void OLED_PrintChar(char c) {
+    const uint8_t font[][5] = {
+        {0x00,0x00,0x00,0x00,0x00}, // space
+        {0x3E,0x51,0x49,0x45,0x3E}, // 0
+        {0x00,0x42,0x7F,0x40,0x00}, // 1
+        {0x42,0x61,0x51,0x49,0x46}, // 2
+        {0x21,0x41,0x45,0x4B,0x31}, // 3
+        {0x18,0x14,0x12,0x7F,0x10}, // 4
+        {0x27,0x45,0x45,0x45,0x39}, // 5
+        {0x3C,0x4A,0x49,0x49,0x30}, // 6
+        {0x01,0x71,0x09,0x05,0x03}, // 7
+        {0x36,0x49,0x49,0x49,0x36}, // 8
+        {0x06,0x49,0x49,0x29,0x1E}, // 9
+        {0x7E,0x11,0x11,0x11,0x7E}, // A
+        {0x7F,0x49,0x49,0x49,0x36}, // B
+        {0x3E,0x41,0x41,0x41,0x22}, // C
+        {0x7F,0x41,0x41,0x22,0x1C}, // D
+        {0x7F,0x49,0x49,0x49,0x41}, // E
+        {0x7F,0x09,0x09,0x09,0x01}, // F
+        {0x3E,0x41,0x49,0x49,0x7A}, // G
+        {0x7F,0x08,0x08,0x08,0x7F}, // H
+        {0x00,0x41,0x7F,0x41,0x00}, // I
+        {0x20,0x40,0x41,0x3F,0x01}, // J
+        {0x7F,0x08,0x14,0x22,0x41}, // K
+        {0x7F,0x40,0x40,0x40,0x40}, // L
+        {0x7F,0x02,0x0C,0x02,0x7F}, // M
+        {0x7F,0x04,0x08,0x10,0x7F}, // N
+        {0x3E,0x41,0x41,0x41,0x3E}, // O
+        {0x7F,0x09,0x09,0x09,0x06}, // P
+        {0x3E,0x41,0x51,0x21,0x5E}, // Q
+        {0x7F,0x09,0x19,0x29,0x46}, // R
+        {0x46,0x49,0x49,0x49,0x31}, // S
+        {0x01,0x01,0x7F,0x01,0x01}, // T
+        {0x3F,0x40,0x40,0x40,0x3F}, // U
+        {0x1F,0x20,0x40,0x20,0x1F}, // V
+        {0x3F,0x40,0x38,0x40,0x3F}, // W
+        {0x63,0x14,0x08,0x14,0x63}, // X
+        {0x07,0x08,0x70,0x08,0x07}, // Y
+        {0x61,0x51,0x49,0x45,0x43}, // Z
+    };
+    
+    uint8_t idx = 0;
+    if (c >= '0' && c <= '9') idx = c - '0' + 1;
+    else if (c >= 'A' && c <= 'Z') idx = c - 'A' + 11;
+    else if (c == ' ') idx = 0;
+    else idx = 0;
+    
+    for (uint8_t i = 0; i < 5; i++) {
+        OLED_WriteData(font[idx][i]);
+    }
+    OLED_WriteData(0x00);
+}
+
+void OLED_PrintString(char *str) {
+    while (*str) {
+        OLED_PrintChar(*str++);
+    }
+}
+
+void OLED_PrintNumber(uint16_t num) {
+    char buffer[16];
+    sprintf(buffer, "%d", num);
+    OLED_PrintString(buffer);
+}
+
+void OLED_DisplayDistance(uint16_t distance) {
+    char dist_str[16];
+    char status_str[16];
+    
+    sprintf(dist_str, "%4d mm", distance);
+    
+    if (distance < 100) {
+        sprintf(status_str, "VERY CLOSE");
+    } else if (distance < 500) {
+        sprintf(status_str, "CLOSE");
+    } else if (distance < 2000) {
+        sprintf(status_str, "FAR");
+    } else {
+        sprintf(status_str, "NO TARGET");
+    }
+    
+    OLED_SetCursor(0, 0);
+    OLED_PrintString("BALLBOT");
+    
+    OLED_SetCursor(0, 2);
+    OLED_PrintString("DIST:");
+    
+    OLED_SetCursor(48, 2);
+    OLED_PrintString(dist_str);
+    
+    OLED_SetCursor(0, 4);
+    OLED_PrintString("STATUS:");
+    
+    OLED_SetCursor(56, 4);
+    OLED_PrintString(status_str);
+    
+    OLED_SetCursor(0, 6);
+    OLED_PrintString("SENSOR:VL53L0X");
+}
+
+/* ========== VL53L0X FUNCTIONS ========== */
+uint8_t VL53L0X_Init(void) {
+    uint8_t model_id;
+    uint8_t retry;
+    
+    UART_Print("[VL53L0X] Initializing on I2C2 (PB10,PB11)...\r\n");
+    
+    HAL_Delay(100);
+    
+    for (retry = 0; retry < 5; retry++) {
+        if (HAL_I2C_Mem_Read(&hi2c2, VL53L0X_ADDR << 1, VL53L0X_REG_ID_MODEL, 
+                              I2C_MEMADD_SIZE_8BIT, &model_id, 1, 100) == HAL_OK) {
+            if (model_id == VL53L0X_EXPECTED_ID) break;
+        }
+        HAL_Delay(50);
+    }
+    
+    if (model_id != VL53L0X_EXPECTED_ID) {
+        UART_PrintNumber("[VL53L0X] ERROR: Model ID=0x", model_id, "\r\n");
+        return 0;
+    }
+    
+    UART_Print("[VL53L0X] OK! Model ID: 0xEE\r\n");
+    
+    uint8_t data = 0x02;
+    HAL_I2C_Mem_Write(&hi2c2, VL53L0X_ADDR << 1, VL53L0X_REG_START, 
+                      I2C_MEMADD_SIZE_8BIT, &data, 1, 100);
+    
+    UART_Print("[VL53L0X] Continuous measurement started!\r\n");
+    return 1;
+}
+
+uint16_t VL53L0X_ReadDistance(void) {
+    uint8_t buf[2];
+    if (HAL_I2C_Mem_Read(&hi2c2, VL53L0X_ADDR << 1, VL53L0X_REG_DISTANCE, 
+                          I2C_MEMADD_SIZE_8BIT, buf, 2, 100) != HAL_OK) {
+        return 9999;
+    }
+    uint16_t raw = (buf[0] << 8) | buf[1];
+    if (raw < 8190) {
+        return raw;
+    }
+    return 9999;
+}
+
+/* UART Interrupt Callback */
+void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart) {
+    if (huart->Instance == USART1) {
+        if (uart_index < UART_BUFFER_SIZE - 1) {
+            uart_buffer[uart_index++] = rx_data;
+        }
+        HAL_UART_Receive_IT(&huart1, &rx_data, 1);
+    }
+}
+
+/* USER CODE END 0 */
+
+int main(void)
+{
+    HAL_Init();
+    SystemClock_Config();
+    MX_GPIO_Init();
+    MX_I2C1_Init();
+    MX_I2C2_Init();
+    MX_USART1_UART_Init();
+
+    /* USER CODE BEGIN 2 */
+    
+    UART_Print("\r\n");
+    UART_Print("========================================\r\n");
+    UART_Print("     BALLBOT SYSTEM STARTING\r\n");
+    UART_Print("========================================\r\n");
+    
+    LED_Blink(2, 200);
+    
+    /* Initialize OLED */
+    OLED_Init();
+    OLED_Clear();
+    UART_Print("[OK] OLED initialized on I2C1 (PB6,PB7)\r\n");
+    
+    /* Initialize VL53L0X */
+    laser_ok = VL53L0X_Init();
+    if (laser_ok) {
+        UART_Print("[OK] VL53L0X initialized on I2C2 (PB10,PB11)\r\n");
+        LED_Blink(2, 100);
+    } else {
+        UART_Print("[ERROR] VL53L0X not found!\r\n");
+        LED_Blink(10, 200);
+    }
+    
+    /* Start UART receive interrupt */
+    HAL_UART_Receive_IT(&huart1, &rx_data, 1);
+    
+    UART_Print("========================================\r\n");
+    UART_Print("System ready. Commands: GET_DIST, LED_ON, LED_OFF\r\n");
+    UART_Print("========================================\r\n");
+    
+    /* Display initial screen */
+    OLED_DisplayDistance(laser_distance);
+    
+    /* USER CODE END 2 */
+
+    while (1)
+    {
+        /* USER CODE BEGIN 3 */
+        
+        if (laser_ok) {
+            uint16_t new_distance = VL53L0X_ReadDistance();
+            
+            if (new_distance != laser_distance) {
+                laser_distance = new_distance;
+                OLED_DisplayDistance(laser_distance);
+                
+                char auto_msg[32];
+                sprintf(auto_msg, "Distance: %d mm", laser_distance);
+                UART_SendResponse(auto_msg);
+            }
+        }
+        
+        ProcessUARTCommand();
+        
+        /* LED feedback */
+        if (laser_distance < 100) {
+            LED_Blink(1, 50);
+        } else if (laser_distance < 500) {
+            LED_Blink(1, 200);
+        } else {
+            LED_Off();
+        }
+        
+        HAL_Delay(100);
+        
+        /* USER CODE END 3 */
+    }
+}
+
+void SystemClock_Config(void)
+{
+    RCC_OscInitTypeDef RCC_OscInitStruct = {0};
+    RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
+
+    RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSE;
+    RCC_OscInitStruct.HSEState = RCC_HSE_ON;
+    RCC_OscInitStruct.HSEPredivValue = RCC_HSE_PREDIV_DIV1;
+    RCC_OscInitStruct.HSIState = RCC_HSI_ON;
+    RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
+    RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSE;
+    RCC_OscInitStruct.PLL.PLLMUL = RCC_PLL_MUL9;
+    if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK) Error_Handler();
+
+    RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK|RCC_CLOCKTYPE_SYSCLK
+                                |RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2;
+    RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
+    RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
+    RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV2;
+    RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV1;
+
+    if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_2) != HAL_OK) Error_Handler();
+}
+
+void Error_Handler(void)
+{
+    __disable_irq();
+    while(1) {}
+}
